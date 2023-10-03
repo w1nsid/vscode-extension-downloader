@@ -1,12 +1,15 @@
 import asyncio
+import json
 import os
+import random
 
 import aiohttp
 import pyppeteer
 from bs4 import BeautifulSoup
 from semver import compare as compare_versions
 
-HEADERS = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:91.0) Gecko/20100101 Firefox/91.0'}
+with open('header.json', 'r') as file:
+    HEADERS = json.load(file)
 
 
 def parse_dir(directory):
@@ -78,19 +81,39 @@ async def get_extension_version(url):
         return None
 
 
-async def start_download(extension, url, directory):
-    try:
-        print(f"Starting download from {url}")
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, headers=HEADERS) as response:
-                if response.status == 200:
-                    content = await response.read()
-                    with open(os.path.join(directory, f"{extension['app']}-{extension['version']}.vsix"), 'wb') as f:
-                        f.write(content)
-                else:
-                    print(f"Unable to download {extension}. Status: {response.status}")
-    except Exception as e:
-        print(f"Error while downloading {extension}: {e}")
+async def start_download(extension, url, directory, last_ver=None):
+    retry_after = 3  # default delay in seconds if Retry-After header is not found
+    max_retries = 5  # number of times to retry in case of rate limiting
+    for _ in range(max_retries):
+        try:
+            print(f"Starting download from {url}")
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers=HEADERS) as response:
+                    if response.status == 429:  # Rate limited
+                        retry_after = int(response.headers.get('Retry-After', retry_after))
+                        jitter = random.uniform(0, 0.5)  # adding a jitter factor
+                        sleep_duration = retry_after + jitter
+                        print(f"Rate limited. Retrying in {sleep_duration:.2f} seconds...")
+                        await asyncio.sleep(sleep_duration)
+                        continue
+                    elif response.status == 200:
+                        content = await response.read()
+
+                        # Get filename from Content-Disposition header
+                        if response.content_disposition and response.content_disposition.filename:
+                            filename = response.content_disposition.filename
+                        else:
+                            filename = f"{extension['app']}-{last_ver}.vsix"
+
+                        with open(os.path.join(directory, filename), 'wb') as f:
+                            f.write(content)
+                        break  # Successfully downloaded
+                    else:
+                        print(f"Unable to download {extension}. Status: {response.status}")
+                        break  # Stop on unexpected error
+        except Exception as e:
+            print(f"Error while downloading {extension}: {e}")
+            break
 
 
 def delete_extensions(old_extensions, directory):
@@ -121,21 +144,25 @@ async def start(mode, directory):
         print(f"{ext}, latest version: {latest_version}")
 
         if not latest_version:
+            print(f"Unable to fetch latest version for {ext['app']}. Skipping...")
             continue
+
+        if compare_versions(latest_version, ext['version']) > 0:
+            print(f"New version found for {ext['app']}")
+            old_extensions.append(ext)
 
         file_exists = os.path.exists(os.path.join(directory, f"{ext['app']}-{latest_version}.vsix"))
         if file_exists:
+            print(f"{ext['app']}-{latest_version}.vsix already exists. Skipping...")
             continue
 
         url = f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{ext['publisher']}/vsextensions/{ext['name']}/{latest_version}/vspackage"
-        await start_download(ext, url, directory)
-
-        if compare_versions(latest_version, ext['version']) > 0:
-            old_extensions.append(ext)
+        await start_download(ext, url, directory, latest_version)
+        print(f"{ext['app']}-{latest_version}.vsix downloaded")
 
     delete_extensions(old_extensions, directory)
 
 
 directory = "ext"
-mode = 'file'
+mode = 'dir'
 asyncio.run(start(mode, directory))
