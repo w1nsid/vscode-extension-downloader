@@ -1,0 +1,2 @@
+ms-vscode-remote.remote-ssh@0.65.4
+ms-vscode-remote.remote-wsl@0.56.0
