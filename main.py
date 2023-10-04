@@ -100,48 +100,70 @@ async def get_extension_version(url):
     return None
 
 
-async def start_download(extension, url, directory, last_ver=None):
-    retry_after = 1  # default delay in seconds if Retry-After header is not found
-    max_retries = 5  # number of times to retry in case of rate limiting
+async def start_download(extension, url, directory, last_ver=None, max_retries=5):
+    """
+    Downloads the extension file from the provided URL.
+
+    Usage:
+
+    >>> await start_download({'app': 'YourExtensionName'}, 'http://example.com/download', '/path/to/save')
+    
+    Args:
+    - extension (dict): Dictionary containing 'app' key for the name of the extension.
+    - url (str): URL to download from.
+    - directory (str): Directory to save the downloaded file.
+    - last_ver (str, optional): Last version of the extension. Defaults to None.
+    - max_retries (int, optional): Max retries in case of rate limiting. Defaults to 5.
+    
+    Returns:
+    Status of the download. True if successful, False otherwise.
+    """
+
+    retry_after = 1  # Default delay in seconds if Retry-After header is not found
+    status = False
+
     print(f"Downloading {extension['app']}...")
-    for _ in range(max_retries):
+    for attempt in range(max_retries):
         try:
-            if _ > 0:
-                print(f"Retry attempt {_ + 1}...")
+            if attempt > 0:
+                print(f"Retry attempt {attempt + 1}...")
+
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=HEADERS) as response:
                     if response.status == 429:  # Rate limited
                         retry_after = int(response.headers.get('Retry-After', retry_after))
-                        jitter = random.uniform(0, 0.5)  # adding a jitter factor
+                        jitter = random.uniform(0, 0.5)  # Adding a jitter factor
                         sleep_duration = retry_after + jitter
                         print(f"Rate limited. Retrying in {sleep_duration:.2f} seconds...")
                         await asyncio.sleep(sleep_duration)
                         continue
+
                     elif response.status == 200:
                         if response.content_disposition and response.content_disposition.filename:
                             filename = response.content_disposition.filename
                         else:
                             filename = f"{extension['app']}-{last_ver}.vsix"
 
-                        if "linux" in filename:
-                            # VSIX files for Linux so must sleep and add "?targetPlatform=win32-x64" to URL
-                            jitter = random.uniform(0, 0.5)  # adding a jitter factor
-                            sleep_duration = retry_after + jitter
+                        if "@" in filename and "win32-x64" not in filename.lower():
                             url += "?targetPlatform=win32-x64"
-                            await asyncio.sleep(sleep_duration)
-                            continue
+                            continue  # Retry immediately with the modified URL
 
                         content = await response.read()
-                        # Get filename from Content-Disposition header
                         with open(os.path.join(directory, filename), 'wb') as f:
                             f.write(content)
+                        print(f"{filename} downloaded.")
+                        status = True
                         break  # Successfully downloaded
+
                     else:
-                        print(f"Unable to download {extension}. Status: {response.status}")
+                        print(f"Unable to download {url}. Status: {response.status}")
                         break  # Stop on unexpected error
+
         except Exception as e:
-            print(f"Error while downloading {extension}: {e}")
+            print(f"Error while downloading {url}: {e}")
             break
+
+    return status
 
 
 def delete_extensions(old_extensions, directory):
@@ -163,8 +185,23 @@ def get_extensions(mode, directory):
 
 async def start(mode, directory):
     old_extensions = []
+    failed_extensions = []
     extensions = get_extensions(mode, directory)
 
+    await process_ext(directory, old_extensions, failed_extensions, extensions)
+
+    delete_extensions(old_extensions, directory)
+
+    if failed_extensions:
+        print("Retry failed downloads? (y/n)")
+        retry = input().strip().lower()
+        if retry == 'y':
+            failed_extensions_2 = []
+            old_extensions_2 = []
+            await process_ext(directory, old_extensions_2, failed_extensions_2, failed_extensions)
+
+
+async def process_ext(directory, old_extensions, failed_extensions, extensions):
     for ext in extensions:
         latest_version = await get_extension_version(
             f"https://marketplace.visualstudio.com/items?itemName={ext['app']}"
@@ -173,6 +210,7 @@ async def start(mode, directory):
 
         if not latest_version:
             print(f"Unable to fetch latest version for {ext['app']}. Skipping...")
+            failed_extensions.append(ext)
             continue
 
         if compare_versions(latest_version, ext['version']) > 0:
@@ -185,12 +223,62 @@ async def start(mode, directory):
             continue
 
         url = f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{ext['publisher']}/vsextensions/{ext['name']}/{latest_version}/vspackage"
-        await start_download(ext, url, directory, latest_version)
-        print(f"{ext['app']}-{latest_version}.vsix downloaded")
+        result = await start_download(ext, url, directory, latest_version)
+        if not result:
+            failed_extensions.append(ext)
 
-    delete_extensions(old_extensions, directory)
 
+# async def handle_extension(ext, directory):
+#     latest_version = await get_extension_version(f"https://marketplace.visualstudio.com/items?itemName={ext['app']}")
+#     is_new = True
+#     succes = False
 
-directory = "myprofile"
+#     if not latest_version:
+#         print(f"Unable to fetch latest version for {ext['app']}. Skipping...")
+#         return is_new, succes
+
+#     if compare_versions(latest_version, ext['version']) > 0:
+#         print(f"New version found for {ext['app']}")
+#         is_new = False
+
+#     file_exists = os.path.exists(os.path.join(directory, f"{ext['app']}-{latest_version}.vsix"))
+#     if file_exists:
+#         print(f"{ext['app']}-{latest_version}.vsix already exists and up to date. Skipping...")
+#         succes = True
+#         return is_new, succes
+
+#     url = f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{ext['publisher']}/vsextensions/{ext['name']}/{latest_version}/vspackage"
+#     succes = await start_download(ext, url, directory, latest_version)
+#     return is_new, succes
+
+# async def start_multi(mode, directory):
+
+#     extensions = get_extensions(mode, directory)
+
+#     # Run tasks concurrently
+#     results = await asyncio.gather(*[handle_extension(ext, directory) for ext in extensions])
+
+#     # Filter extensions based on results
+#     old_extensions = [extensions[i] for i, (is_new, _) in enumerate(results) if not is_new]
+#     up_to_date_extensions = [extensions[i] for i, (is_new, success) in enumerate(results) if is_new and success]
+#     failed_extensions = [extensions[i] for i, (_, success) in enumerate(results) if not success]
+
+#     # Delete old extensions
+#     delete_extensions(old_extensions, directory)
+
+#     # Offer to retry failed downloads
+#     if failed_extensions:
+#         print("Retry failed downloads? (y/n)")
+#         retry = input().strip().lower()
+#         if retry == 'y':
+#             await asyncio.gather(*[handle_extension(ext, directory) for ext in failed_extensions])
+
+#     # Log successful updates
+#     if up_to_date_extensions:
+#         print("The following extensions are up-to-date:")
+#         for ext in up_to_date_extensions:
+#             print(f"{ext['app']} v{ext['version']}")
+
+directory = "mynewprofile"
 mode = 'file'
 asyncio.run(start(mode, directory))
