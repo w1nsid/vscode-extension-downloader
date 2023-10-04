@@ -183,12 +183,12 @@ def get_extensions(mode, directory):
     return parse_file(directory)
 
 
-async def start(mode, directory):
+async def start(mode, update, directory):
     old_extensions = []
     failed_extensions = []
     extensions = get_extensions(mode, directory)
 
-    await process_ext(directory, old_extensions, failed_extensions, extensions)
+    await process_ext(directory, old_extensions, failed_extensions, extensions, update)
 
     delete_extensions(old_extensions, directory)
 
@@ -201,29 +201,33 @@ async def start(mode, directory):
             await process_ext(directory, old_extensions_2, failed_extensions_2, failed_extensions)
 
 
-async def process_ext(directory, old_extensions, failed_extensions, extensions):
+async def process_ext(directory, old_extensions, failed_extensions, extensions, update=False):
     for ext in extensions:
-        latest_version = await get_extension_version(
-            f"https://marketplace.visualstudio.com/items?itemName={ext['app']}"
-        )
-        # print(f"{ext}, latest version: {latest_version}")
+        desired_version = ext['version']
+        if update:
+            latest_version = await get_extension_version(
+                f"https://marketplace.visualstudio.com/items?itemName={ext['app']}"
+            )
+            # print(f"{ext}, latest version: {latest_version}")
 
-        if not latest_version:
-            print(f"Unable to fetch latest version for {ext['app']}. Skipping...")
-            failed_extensions.append(ext)
-            continue
+            if not latest_version:
+                print(f"Unable to fetch latest version for {ext['app']}. Skipping...")
+                failed_extensions.append(ext)
+                continue
 
-        if compare_versions(latest_version, ext['version']) > 0:
-            print(f"New version found for {ext['app']}")
-            old_extensions.append(ext)
+            if compare_versions(latest_version, ext['version']) > 0:
+                print(f"New version found for {ext['app']}")
+                old_extensions.append(ext)
 
-        file_exists = os.path.exists(os.path.join(directory, f"{ext['app']}-{latest_version}.vsix"))
+            desired_version = latest_version
+
+        file_exists = os.path.exists(os.path.join(directory, f"{ext['app']}-{desired_version}.vsix"))
         if file_exists:
-            print(f"{ext['app']}-{latest_version}.vsix already exists. Skipping...")
+            print(f"{ext['app']}-{desired_version}.vsix already exists. Skipping...")
             continue
 
-        url = f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{ext['publisher']}/vsextensions/{ext['name']}/{latest_version}/vspackage"
-        result = await start_download(ext, url, directory, latest_version)
+        url = f"https://marketplace.visualstudio.com/_apis/public/gallery/publishers/{ext['publisher']}/vsextensions/{ext['name']}/{desired_version}/vspackage"
+        result = await start_download(ext, url, directory, desired_version)
         if not result:
             failed_extensions.append(ext)
 
@@ -280,5 +284,6 @@ async def process_ext(directory, old_extensions, failed_extensions, extensions):
 #             print(f"{ext['app']} v{ext['version']}")
 
 directory = "mynewprofile"
-mode = 'file'
-asyncio.run(start(mode, directory))
+scan_mode = 'file'
+update = False
+asyncio.run(start(scan_mode, update, directory))
