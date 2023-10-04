@@ -69,24 +69,45 @@ async def crawl_with_puppeteer(url):
     return content
 
 
+async def fetch_content_with_aiohttp(url, retries=3):
+    for attempt in range(retries):
+        try:
+            async with aiohttp.ClientSession(headers=HEADERS) as session:
+                async with session.get(url) as response:
+                    if response.status == 200:
+                        return await response.text()
+                    print(f"Attempt {attempt + 1} failed with status {response.status}. Retrying...")
+        except Exception as e:
+            print(f"Retry attempt {attempt + 1} due to error: {e}")
+    print(f"Failed to fetch content from {url} after {retries} retries.")
+    return None
+
+
 async def get_extension_version(url):
-    try:
-        response = await crawl_with_puppeteer(url)
-        soup = BeautifulSoup(response, 'html.parser')
-        info_table = soup.select('.ux-table-metadata > tbody > tr > td')[1]
-        version = info_table.get_text().strip()
-        return version
-    except Exception as e:
-        print(f"Unable to fetch extension version at {url}: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            response = await crawl_with_puppeteer(url)
+            soup = BeautifulSoup(response, 'html.parser')
+            info_table = soup.select('.ux-table-metadata > tbody > tr > td')[1]
+            version = info_table.get_text().strip()
+            return version
+        except Exception as e:
+            if attempt > 0:
+                print(f"Retry attempt {attempt + 1} due to error: {e}")
+            await asyncio.sleep(1)
+            continue
+    print(f"Failed to fetch version from {url} after 3 retries.")
+    return None
 
 
 async def start_download(extension, url, directory, last_ver=None):
-    retry_after = 3  # default delay in seconds if Retry-After header is not found
+    retry_after = 1  # default delay in seconds if Retry-After header is not found
     max_retries = 5  # number of times to retry in case of rate limiting
+    print(f"Downloading {extension['app']}...")
     for _ in range(max_retries):
         try:
-            print(f"Starting download from {url}")
+            if _ > 0:
+                print(f"Retry attempt {_ + 1}...")
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=HEADERS) as response:
                     if response.status == 429:  # Rate limited
@@ -97,14 +118,21 @@ async def start_download(extension, url, directory, last_ver=None):
                         await asyncio.sleep(sleep_duration)
                         continue
                     elif response.status == 200:
-                        content = await response.read()
-
-                        # Get filename from Content-Disposition header
                         if response.content_disposition and response.content_disposition.filename:
                             filename = response.content_disposition.filename
                         else:
                             filename = f"{extension['app']}-{last_ver}.vsix"
 
+                        if "linux" in filename:
+                            # VSIX files for Linux so must sleep and add "?targetPlatform=win32-x64" to URL
+                            jitter = random.uniform(0, 0.5)  # adding a jitter factor
+                            sleep_duration = retry_after + jitter
+                            url += "?targetPlatform=win32-x64"
+                            await asyncio.sleep(sleep_duration)
+                            continue
+
+                        content = await response.read()
+                        # Get filename from Content-Disposition header
                         with open(os.path.join(directory, filename), 'wb') as f:
                             f.write(content)
                         break  # Successfully downloaded
@@ -141,7 +169,7 @@ async def start(mode, directory):
         latest_version = await get_extension_version(
             f"https://marketplace.visualstudio.com/items?itemName={ext['app']}"
         )
-        print(f"{ext}, latest version: {latest_version}")
+        # print(f"{ext}, latest version: {latest_version}")
 
         if not latest_version:
             print(f"Unable to fetch latest version for {ext['app']}. Skipping...")
@@ -163,6 +191,6 @@ async def start(mode, directory):
     delete_extensions(old_extensions, directory)
 
 
-directory = "ext"
-mode = 'dir'
+directory = "myprofile"
+mode = 'file'
 asyncio.run(start(mode, directory))
